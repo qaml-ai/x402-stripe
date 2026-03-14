@@ -1,0 +1,9 @@
+{
+  "name": "x402-stripe",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.ts",
+  "dependencies": {
+    "hono": "^4.12.7"
+  }
+}
