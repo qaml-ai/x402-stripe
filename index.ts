@@ -1,8 +1,9 @@
 /**
- * x402-stripe: API key authentication + Stripe metered billing middleware.
+ * x402-stripe: API key authentication + Stripe metered billing with prepaid credits.
  *
  * Provides an alternative payment path to x402: users with an API key
- * skip the x402 payment flow and get billed via Stripe metered subscriptions.
+ * skip the x402 payment flow and get billed via Stripe metered subscriptions
+ * backed by prepaid credit grants.
  *
  * Usage:
  *   import { stripeApiKeyMiddleware } from "x402-stripe";
@@ -30,6 +31,8 @@
  *     "active": true,
  *     "createdAt": "2026-03-14T00:00:00Z"
  *   }
+ *
+ * Credit balance is cached in KV as "balance:<stripeCustomerId>" with a 60s TTL.
  */
 
 import type { MiddlewareHandler } from "hono";
@@ -49,6 +52,45 @@ interface StripeMiddlewareOptions {
 }
 
 const API_KEY_PREFIX = "sk_camel_";
+const BALANCE_CACHE_TTL = 60; // seconds
+
+async function getCreditBalance(
+  stripeKey: string,
+  customerId: string,
+  kv: KVNamespace
+): Promise<number> {
+  // Check KV cache first
+  const cacheKey = `balance:${customerId}`;
+  const cached = await kv.get(cacheKey);
+  if (cached !== null) {
+    return parseInt(cached, 10);
+  }
+
+  // Fetch from Stripe
+  const params = new URLSearchParams({
+    customer: customerId,
+    "filter[type]": "applicability_scope",
+    "filter[applicability_scope][price_type]": "metered",
+  });
+
+  const res = await fetch(
+    `https://api.stripe.com/v1/billing/credit_balance_summary?${params}`,
+    {
+      headers: { Authorization: `Basic ${btoa(stripeKey + ":")}` },
+    }
+  );
+
+  let balance = 0;
+  if (res.ok) {
+    const data = (await res.json()) as any;
+    balance = data.balances?.[0]?.available_balance?.monetary?.value ?? 0;
+  }
+
+  // Cache for 60s
+  await kv.put(cacheKey, String(balance), { expirationTtl: BALANCE_CACHE_TTL });
+
+  return balance;
+}
 
 export function stripeApiKeyMiddleware(
   options: StripeMiddlewareOptions
@@ -88,9 +130,22 @@ export function stripeApiKeyMiddleware(
       return c.json({ error: "API key is deactivated" }, 403);
     }
 
-    // Report usage to Stripe Meter Events API
+    // Check credit balance
     const stripeKey = env.STRIPE_SECRET_KEY as string | undefined;
     if (stripeKey) {
+      const balance = await getCreditBalance(stripeKey, keyData.stripeCustomerId, kv);
+      if (balance <= 0) {
+        return c.json(
+          {
+            error: "Insufficient credits",
+            balance: 0,
+            message: "Purchase more credits to continue using the API",
+          },
+          402
+        );
+      }
+
+      // Report usage to Stripe Meter Events API
       const meterEvent = {
         event_name: `camelai_${options.serviceName.replace(/-/g, "_")}`,
         payload: {
@@ -99,7 +154,6 @@ export function stripeApiKeyMiddleware(
         },
       };
 
-      // Fire and don't block the response
       const meterPromise = fetch("https://api.stripe.com/v2/billing/meter_events", {
         method: "POST",
         headers: {
