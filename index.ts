@@ -145,15 +145,17 @@ export function stripeApiKeyMiddleware(
         );
       }
 
-      // Report usage to Stripe Meter Events API
-      const meterEvent = {
-        event_name: `camelai_${options.serviceName.replace(/-/g, "_")}`,
-        payload: {
-          stripe_customer_id: keyData.stripeCustomerId,
-          value: "1",
-        },
-      };
+    }
 
+    // Mark request as API-key-authenticated so x402 middleware is skipped
+    c.set("skipX402", true);
+    c.set("apiKeyUser", keyData);
+
+    // Run the handler first
+    await next();
+
+    // Only meter usage if the handler succeeded (match x402 settle behavior)
+    if (stripeKey && c.res && c.res.status < 400) {
       const meterPromise = fetch("https://api.stripe.com/v2/billing/meter_events", {
         method: "POST",
         headers: {
@@ -161,22 +163,23 @@ export function stripeApiKeyMiddleware(
           "Content-Type": "application/json",
           "Stripe-Version": "2025-11-17.clover",
         },
-        body: JSON.stringify(meterEvent),
+        body: JSON.stringify({
+          event_name: `camelai_${options.serviceName.replace(/-/g, "_")}`,
+          payload: {
+            stripe_customer_id: keyData.stripeCustomerId,
+            value: "1",
+          },
+        }),
       }).catch((e) => {
         console.error("Stripe meter event failed:", e);
       });
 
-      // Use waitUntil so the meter call completes even after response is sent
       if (c.executionCtx?.waitUntil) {
         c.executionCtx.waitUntil(meterPromise);
       }
     }
 
-    // Mark request as API-key-authenticated so x402 middleware is skipped
-    c.set("skipX402", true);
-    c.set("apiKeyUser", keyData);
-
-    return next();
+    return;
   };
 }
 
