@@ -105,7 +105,7 @@ export function stripeApiKeyMiddleware(
         headers: {
           Authorization: `Bearer ${stripeKey}`,
           "Content-Type": "application/json",
-          "Stripe-Version": "2025-04-30.basil",
+          "Stripe-Version": "2025-11-17.clover",
         },
         body: JSON.stringify(meterEvent),
       }).catch((e) => {
